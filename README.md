@@ -3,13 +3,22 @@
 A local tool for [gib.meme](https://gib.meme) players that automates the
 tedious part of tournament prep: building decks from your binder and
 submitting them all in one Phantom approval flow instead of clicking through
-86 popups one at a time.
+one popup per deck.
 
-The bot does **not** try to be smart about deck construction. It sorts your
-available cards by raw power (the same value gib.meme shows on each card)
-and fills decks of 3 unique-meme cards from strongest down. If you want a
-cleverer strategy, edit `plan.json` between `plan` and `submit`, or fork
-this and write your own scorer.
+The bot does **not** try to be smart about deck construction. It uses a
+power-descending strategy: sorts your available cards by raw power (the
+same value gib.meme shows on each card) and fills decks of 3 unique-meme
+cards from strongest down. It submits every deck it can build, regardless
+of how many cards you have.
+
+If you have your own strategy for specific decks, **submit those decks
+manually on gib.meme FIRST**, then run the bot to fill in everything else.
+The bot re-checks on-chain state before each pass and automatically skips
+cards that are already registered in the tournament, so your manual picks
+won't be touched or duplicated.
+
+If you'd rather automate a different ordering, edit `state/plan.json`
+between `plan` and `submit`, or fork this and write your own scorer.
 
 ## What it actually saves you
 
@@ -23,29 +32,81 @@ this and write your own scorer.
 - Re-checks on-chain state between retries so it never re-submits a deck
   that just landed.
 
-## Requirements
+## Before you start
 
-- Python 3.10+
-- A Solana wallet that has gib.meme cards deposited into its binder (deposit
-  them via the gib.meme UI first, or use the `deposit` command below if you
-  have loose cards in your wallet).
-- A [Helius](https://helius.dev) API key. The free tier is plenty for
-  occasional tournament submission — a full 86-deck submit uses well under
-  1k credits, and Helius free is 1M/month.
-- A browser with the Phantom extension installed (or Phantom mobile + a way
-  to open `localhost:8787` on the same device).
+Have these ready before installing — the install steps assume them:
 
-## Install
+- **A Solana wallet with the Phantom extension installed.** You'll need your
+  wallet's **public address** (the long string Phantom shows when you click
+  your account name and pick "Copy address" — also called your "pubkey").
+- **gib.meme cards deposited in your binder.** Cards sitting loose in your
+  wallet are not eligible for tournaments — they have to be in the binder.
+  Deposit at least one card via the gib.meme UI first; that creates the
+  per-user account the bot reads from and writes to. (After that, the
+  `deposit` command below can move the rest in bulk.)
+- **A free [Helius](https://helius.dev) API key.** Sign up, create a
+  project, and copy the **API key** (the long alphanumeric string), not
+  the project ID. The free tier is plenty — a full submit uses well under
+  1k credits even for a large binder, and Helius free is 1M/month.
+- **Chrome (or any Phantom-compatible browser).** Phantom mobile also works
+  if you can open `http://localhost:8787` on the same device.
+
+## Windows quickstart
+
+If you don't already have a Python dev setup on Windows, install these two
+once (skip if you already have them):
+
+1. **Python 3.12, 64-bit** from
+   [python.org/downloads](https://www.python.org/downloads/). On the very
+   first install screen, **check the box "Add python.exe to PATH"** — if
+   you miss this, every command below will fail with "python is not
+   recognized."
+2. **Git for Windows** from
+   [git-scm.com/download/win](https://git-scm.com/download/win). Accept all
+   default options. This installs **Git Bash**, the terminal you'll use to
+   run the commands below.
+
+Then open **Git Bash** (search "Git Bash" in the Start menu) and run:
 
 ```bash
-git clone https://github.com/YOUR-USERNAME/gib-bot.git
+git clone https://github.com/ForWakanda/gib-bot.git
 cd gib-bot
-python -m venv .venv
-source .venv/bin/activate   # Windows: .venv\Scripts\activate
-pip install -e .
-cp .env.example .env
-# edit .env, paste in your Helius key and your wallet's pubkey
+./setup.bat
 ```
+
+The setup script creates a Python virtual environment, installs
+dependencies, and opens `.env` in Notepad. Paste in your Helius API key
+and wallet pubkey, then save and close Notepad.
+
+From now on, **every time you want to run the bot**, open Git Bash,
+`cd` to the `gib-bot` folder, and activate the venv first:
+
+```bash
+source .venv/Scripts/activate
+```
+
+Your prompt will start with `(.venv)`. Then run any command from the
+[Usage](#usage) section below.
+
+## macOS / Linux quickstart
+
+```bash
+git clone https://github.com/ForWakanda/gib-bot.git
+cd gib-bot
+./setup.sh
+```
+
+The setup script creates a virtual environment, installs dependencies,
+and opens `.env` in your default editor. Paste in your Helius API key
+and wallet pubkey, save, and close.
+
+Before running the bot, activate the venv:
+
+```bash
+source .venv/bin/activate
+```
+
+Then run any command from the [Usage](#usage) section below.
 
 ## Usage
 
@@ -65,13 +126,13 @@ python cli.py simulate
 python cli.py submit
 ```
 
-Optional commands:
+## Optional commands
 
 ```bash
 # Move loose gib.meme cards from your wallet INTO your binder so they're
 # eligible for tournaments. One tx per card; requires you've previously
 # deposited at least one card via the gib.meme UI (that creates the per-user
-# PDA the bot needs).
+# account the bot needs).
 python cli.py deposit
 
 # Submit but don't auto-retry at smaller batch sizes.
@@ -81,6 +142,28 @@ python cli.py submit --no-retry
 python cli.py plan --tournament 84
 python cli.py submit --tournament 84
 ```
+
+## Troubleshooting
+
+- **`python` is not recognized / command not found** (Windows): Python
+  isn't on your PATH. Reinstall Python and tick **"Add python.exe to
+  PATH"** on the first install screen.
+- **`pip install` fails with compiler / build errors**: confirm you're on
+  Python 3.12 by running `python --version`. Older or very new Python
+  versions may not have prebuilt wheels for every dependency.
+- **`source .venv/Scripts/activate` does nothing or errors** (Windows):
+  you're in the wrong terminal. Use **Git Bash**, not CMD or PowerShell.
+  If you must use CMD, run `.venv\Scripts\activate.bat` instead.
+- **`401 Unauthorized` from RPC**: wrong Helius key in `.env`. In the
+  Helius dashboard, copy the **API key** (long alphanumeric string), not
+  the project ID, not the full RPC URL.
+- **Phantom popup never appears when running `submit`**: the browser
+  blocked the popup, or the browser tab isn't focused. Click into the
+  localhost page in your browser, then re-click "Connect Wallet."
+- **`WALLET` empty / wrong wallet**: double-check `.env`. The pubkey goes
+  on the `WALLET=` line, no quotes, no spaces, no trailing characters.
+- **Port 8787 already in use**: another program is using it. Either close
+  that program, or pass `--port 8788` to `submit` / `deposit`.
 
 ## How submission works
 
@@ -99,7 +182,7 @@ python cli.py submit --tournament 84
 
 - **No warranty.** The on-chain gib.meme program could change; the
   gib.meme stats API could change; this bot could break silently. Always
-  watch the first few txs land before walking away from a 86-deck submit.
+  watch the first few txs land before walking away from a large submit.
 - **No strategy claims.** Power-descending is not a "good" strategy, it's
   the most common one. If you have an opinion about which cards belong
   together, edit `state/plan.json` before running `submit` — every deck is
