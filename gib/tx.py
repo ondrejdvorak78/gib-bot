@@ -3,10 +3,10 @@
 This module is deliberately dependency-free: it produces plain dataclasses
 describing the instruction bytes and account metas. A higher layer (which
 *does* depend on solders) wraps these into signed transactions and broadcasts
-them. Keeping this split means the test suite for PDA + instruction encoding
-stays fast and offline.
+them. Keeping this split means PDA + instruction encoding can be exercised
+fast and offline.
 
-Instruction layout (verified against tx 2BhPio... on mainnet):
+Instruction layout (verified against real mainnet register_to_tournament txs):
 
     disc      : 8 bytes  = sha256("global:register_to_tournament")[:8]
                            = 19d84691f01e600b

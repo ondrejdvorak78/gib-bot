@@ -1,7 +1,7 @@
 """Read and parse the on-chain binder account, resolve card metadata via DAS,
 and join with live stats from the gib.meme backend.
 
-The binder account layout (verified against 8uhLJUCV...):
+The binder account layout (verified against real on-chain binder accounts):
 
     Header (65 bytes):
         disc                8   Anchor discriminator

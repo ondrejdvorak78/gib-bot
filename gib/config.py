@@ -1,9 +1,8 @@
 """Constants for the gib.meme on-chain game.
 
 All values extracted from https://gib.meme bundle (js/app.c2e85beb.js +
-services/anchor/gibmeme.js chunk) and verified against a real
-register_to_tournament transaction on mainnet
-(sig 2BhPioKThCtYuiMrNxKLuuLk4tUcUS8cRHyR7gNARK1GNGWeKix3SuRJCDwGU6GCiMu52Aiv7s7qZtdSmdPRP3K1).
+services/anchor/gibmeme.js chunk) and verified against real
+register_to_tournament transactions on mainnet.
 """
 
 # Anchor program that owns all gib.meme state.
