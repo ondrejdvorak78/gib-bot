@@ -14,6 +14,9 @@ Endpoints:
                             valid ones (skipped txs are reported separately)
   POST /api/signed_chunk  — receives [signedB64...], broadcasts all in
                             parallel, returns per-tx success/error
+
+Fork note (2026-06-15): server binds to 127.0.0.1 by default (was 0.0.0.0).
+See CHANGES.md.
 """
 from __future__ import annotations
 
@@ -88,7 +91,7 @@ function setBar(done, total) {
   let meta;
   try {
     meta = await (await fetch('/api/meta')).json();
-    log('session ' + meta.session_id + ': ' + meta.total + ' tx(s), ' + meta.chunk_size + ' per popup → ' +
+    log('session ' + meta.session_id + ': ' + meta.total + ' tx(s), ' + meta.chunk_size + ' per popup -> ' +
         Math.ceil(meta.total / meta.chunk_size) + ' popup(s) needed');
   } catch(e) {
     setStatus('Failed to load meta', 'err');
@@ -99,8 +102,6 @@ function setBar(done, total) {
 
   let totalSent = 0, totalFailed = 0, totalSkipped = 0, totalDone = 0;
 
-  // Fetch with a stall guard — surface progress instead of silent waits when
-  // pre-simulation hits Helius rate limits and the server takes >30s to reply.
   async function fetchWithStallGuard(url, label, timeoutMs = 30000, maxAttempts = 4) {
     for (let attempt = 1; attempt <= maxAttempts; attempt++) {
       const ctrl = new AbortController();
@@ -150,7 +151,6 @@ function setBar(done, total) {
       continue;
     }
 
-    // Deserialize for Phantom
     const txs = chunk.txs.map(t =>
       VersionedTransaction.deserialize(Uint8Array.from(atob(t.base64), c => c.charCodeAt(0)))
     );
@@ -209,9 +209,6 @@ function setBar(done, total) {
   }
   log('pass done — watching for next cascade pass...');
 
-  // Watch for Python starting a new cascade pass. When it does, /api/meta
-  // returns a fresh session_id and we reload to pick up the new work
-  // automatically (no manual refresh).
   let failStreak = 0;
   while (true) {
     await new Promise(r => setTimeout(r, 2000));
@@ -221,7 +218,7 @@ function setBar(done, total) {
       failStreak = 0;
     } catch(e) {
       failStreak++;
-      if (failStreak >= 10) {  // 20s without server = cascade complete, stop watching
+      if (failStreak >= 10) {
         log('cascade complete (server closed)');
         return;
       }
@@ -286,8 +283,6 @@ class BridgeHandler(BaseHTTPRequestHandler):
             except Exception as e:
                 self._json({"error": str(e)}, status=500)
                 return
-            # Skipped decks (pre-sim revert, etc.) still need to count toward
-            # `total` or done.wait() never fires. Record them as error results.
             skipped = chunk.get("skipped") or []
             if skipped:
                 with self.state.lock:
@@ -315,7 +310,6 @@ class BridgeHandler(BaseHTTPRequestHandler):
         signed_list: list[str] = body.get("signed", [])
         labels: list[str] = body.get("labels", [])
 
-        # Broadcast all in parallel
         per_tx_results: list[dict] = [{} for _ in signed_list]
 
         def broadcast(i: int, b64: str, label: str) -> dict:
@@ -365,6 +359,7 @@ def run_bridge(
     build_chunk: Callable[[int, int], dict],
     timeout: int = 1800,
     open_browser: bool = True,
+    bind_host: str = "127.0.0.1",
 ) -> list[dict]:
     """Start the signing bridge and wait for all chunks to be processed.
 
@@ -372,6 +367,11 @@ def run_bridge(
         "txs": [{"base64": str, "label": str, "index": int}, ...],
         "skipped": [{"label": str, "reason": str}, ...],
     }
+
+    `bind_host` defaults to "127.0.0.1" (localhost-only). Pass "0.0.0.0"
+    explicitly only if you intend the bridge to be reachable from other
+    machines on the LAN — note that the bridge has no authentication and
+    will broadcast any signed bytes posted to /api/signed_chunk.
 
     If open_browser=False, assumes a previous bridge session left a tab open;
     the page will auto-detect the new session_id and reload itself.
@@ -383,34 +383,28 @@ def run_bridge(
     state.build_chunk = build_chunk
 
     handler_class = type("Handler", (BridgeHandler,), {"state": state})
-    # allow_reuse_address avoids "Address already in use" when a previous
-    # cascade pass's socket is still lingering in TIME_WAIT.
     ThreadingHTTPServer.allow_reuse_address = True
-    server = ThreadingHTTPServer(("0.0.0.0", port), handler_class)
+    server = ThreadingHTTPServer((bind_host, port), handler_class)
     threading.Thread(target=server.serve_forever, daemon=True).start()
 
-    url = f"http://localhost:{port}"
+    url = f"http://{'localhost' if bind_host == '127.0.0.1' else bind_host}:{port}"
     n_chunks = (total + chunk_size - 1) // chunk_size
     print(f"\nPhantom bridge session {state.session_id}")
     print(f"  URL: {url}")
-    print(f"  {total} tx(s) in chunks of {chunk_size} → {n_chunks} popup(s) expected\n")
+    print(f"  bind: {bind_host}:{port}")
+    print(f"  {total} tx(s) in chunks of {chunk_size} -> {n_chunks} popup(s) expected\n")
 
     if open_browser:
-        import subprocess
+        import webbrowser
         try:
-            subprocess.Popen(
-                ["cmd.exe", "/c", "start", "", "chrome", url],
-                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-            )
-            print("  (Chrome opened automatically)")
+            webbrowser.open(url)
+            print("  (browser opened automatically)")
         except Exception:
             print(f"  Could not auto-open browser — open manually: {url}")
     else:
         print("  (existing tab will auto-reload via session_id watcher)")
 
     state.done.wait(timeout=timeout)
-    # Brief grace so the page can finish polling /api/meta and reload before
-    # we tear down the server — otherwise the JS sees fetch errors and bails.
     time.sleep(0.3)
     server.shutdown()
     return state.results

@@ -3,6 +3,9 @@
 All values extracted from https://gib.meme bundle (js/app.c2e85beb.js +
 services/anchor/gibmeme.js chunk) and verified against real
 register_to_tournament transactions on mainnet.
+
+Fork note (2026-06-15): LOOKUP_TABLE updated; LOOKUP_TABLE_FALLBACK added. See
+CHANGES.md.
 """
 
 # Anchor program that owns all gib.meme state.
@@ -21,17 +24,32 @@ BOARD_SLOT   = 333
 MASTER_SLOT  = 999
 STORE_SLOT   = 0
 
-# Address lookup table used by the official client. Deduplicates the
-# fixed accounts (board, system program, etc.) across batched instructions.
-LOOKUP_TABLE = "EkBA4F2LaxQvHWL4YhAtJa4ps75Q6We7LWUF7PtHxaLX"
+# Address lookup tables used by the official gib.meme client. Two ALTs are
+# valid concurrently and share 15/17 entries; they differ at indices 9-10.
+# Empirical scan (2026-06-15) of the last 100 register_to_tournament txs on
+# tournament 86 shows 97/100 using LOOKUP_TABLE_OFFICIAL, 3/100 omitting both.
+# We pass BOTH in the v0 message; Solana dedups by pubkey across multiple ALTs.
+LOOKUP_TABLE_OFFICIAL  = "7weLQ3qggTHc71etH4MYgSEFtRfTgMNvv9gzy2ha6bSL"
+LOOKUP_TABLE_FALLBACK  = "EkBA4F2LaxQvHWL4YhAtJa4ps75Q6We7LWUF7PtHxaLX"
+# Back-compat: code that pre-existed in the fork reads LOOKUP_TABLE — kept as
+# the primary so a single-ALT path still works.
+LOOKUP_TABLE = LOOKUP_TABLE_OFFICIAL
 
 # Well-known system program.
 SYSTEM_PROGRAM = "11111111111111111111111111111111"
 
-# Secondary program called at the tail of each official submit tx. Cosmetic
-# activity-log call for the 3.land UI feeds; included to mirror the official
-# client exactly. Not required for the submission itself to succeed.
+# Secondary program called at the tail of each official submit tx in the OLD
+# gib.meme client. Cosmetic activity-log call for the 3.land UI feeds; included
+# to mirror the official client exactly. Not required for the submission itself
+# to succeed.
+# The CURRENT gib.meme official client (as of 2026-06-15) does NOT emit this
+# ix — empirical scan shows 97/100 recent register_to_tournament txs omit it.
+# We default to ENABLE_ACTIVITY_LOG = False to match the current official wire
+# shape; flip True via env var only if you want compatibility with downstream
+# systems that key off this ix.
+import os as _os
 ACTIVITY_LOG_PROGRAM = "L2TExMFKdjpN9kozasaurPirfHy9P8sbXoAN1qA3S95"
+ENABLE_ACTIVITY_LOG  = _os.environ.get("GIB_BOT_ENABLE_ACTIVITY_LOG", "0") == "1"
 
 # Anchor instruction discriminator for register_to_tournament.
 # sha256("global:register_to_tournament")[:8]

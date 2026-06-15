@@ -15,13 +15,13 @@ The binder account layout (verified against real on-chain binder accounts):
         stored_cards        2   u16 — filled card slots
         skip                2
 
-    Cards (152 bytes each × stored_cards):
+    Cards (152 bytes each x stored_cards):
         available           1   u8  bool
         status              1   u8  bool
         asset_hash         32   cNFT asset ID
         extra_u16           2
         extra_u8            1
-        tournament_slots   35   7 × (u8 state + u32 tournament_index)
+        tournament_slots   35   7 x (u8 state + u32 tournament_index)
         traits             40
         random              8
         counter1            4
@@ -30,10 +30,18 @@ The binder account layout (verified against real on-chain binder accounts):
         counter4            4
         big_counter1        8
         flags               8
+
+Fork note (2026-06-15): see CHANGES.md.
+  - parse_binder_account: bounds check on stored_cards added.
+  - Card.is_in_tournament: tournament_index storage assumption made explicit
+    via TOURNAMENT_INDEX_OFFSET (default 1 = on-chain is 1-based). Override
+    via env var GIB_BOT_TOURNAMENT_INDEX_OFFSET if a future gib.meme schema
+    change shifts the convention.
 """
 from __future__ import annotations
 
 import base64
+import os
 import struct
 from dataclasses import dataclass, field
 
@@ -43,6 +51,12 @@ from . import config, pdas, rpc
 CARD_SIZE = 152
 HEADER_SIZE = 65
 MAX_TOURNEY_SLOTS = 7
+
+# The binder stores tournament_index as `API_index + N` where N is the offset
+# below. Empirically N = 1 on the current schema (verified across known-good
+# entries). If gib.meme migrates to a 0-based scheme, set this env var to 0
+# instead of editing the code.
+TOURNAMENT_INDEX_OFFSET = int(os.environ.get("GIB_BOT_TOURNAMENT_INDEX_OFFSET", "1"))
 
 
 @dataclass
@@ -59,7 +73,6 @@ class Card:
     status: bool
     tournament_locks: list[TournamentLock] = field(default_factory=list)
     meme: str | None = None
-    # Live stats (populated by join_stats)
     power: float | None = None
     price: float | None = None
     change_24h: float | None = None
@@ -76,13 +89,15 @@ class Card:
     def is_in_tournament(self, tournament_index: int) -> bool:
         """Check if this card is already registered in a specific tournament.
 
-        The binder stores tournament_index as API_index + 1 (1-based internally),
-        so we check both the exact value and +1 to handle the offset.
+        The binder stores tournament_index with a fixed offset relative to the
+        API-side index (see TOURNAMENT_INDEX_OFFSET at module top). Earlier
+        revisions of this method checked both `tournament_index` AND
+        `tournament_index + 1` to handle the offset by OR — but that masks
+        bugs at the boundary. We use the explicit offset now.
         """
-        return any(
-            t.tournament_index in (tournament_index, tournament_index + 1) and t.state != 0
-            for t in self.tournament_locks
-        )
+        target = tournament_index + TOURNAMENT_INDEX_OFFSET
+        return any(t.tournament_index == target and t.state != 0
+                   for t in self.tournament_locks)
 
     @property
     def is_free(self) -> bool:
@@ -98,8 +113,16 @@ class Card:
 def parse_binder_account(data: bytes) -> list[Card]:
     """Parse raw binder account bytes into a list of Card objects."""
     stored_cards = struct.unpack_from("<H", data, 61)[0]
-    cards: list[Card] = []
 
+    # Bounds check: defends against truncated / mid-resize binder reads.
+    expected_min = HEADER_SIZE + stored_cards * CARD_SIZE
+    if expected_min > len(data):
+        raise ValueError(
+            f"binder truncated: stored_cards={stored_cards} requires {expected_min}B "
+            f"but data is only {len(data)}B"
+        )
+
+    cards: list[Card] = []
     for slot in range(stored_cards):
         off = HEADER_SIZE + slot * CARD_SIZE
         raw = data[off : off + CARD_SIZE]
@@ -132,7 +155,11 @@ def fetch_binder(creator: str) -> list[Card]:
     binder_addr, _ = pdas.binder_pda(creator)
     info = rpc.get_account_info(binder_addr)
     if not info:
-        raise RuntimeError(f"binder account {binder_addr} not found")
+        raise RuntimeError(
+            f"binder account {binder_addr} not found for wallet {creator} — "
+            f"deposit at least one card via the gib.meme UI first; that "
+            f"creates the per-user binder account this tool needs to read"
+        )
     raw = base64.b64decode(info["data"][0])
     return parse_binder_account(raw)
 
@@ -185,7 +212,7 @@ def get_registered_slots(cards: list[Card], tournament_index: int) -> set[int]:
 
 
 def load_full_inventory(creator: str) -> list[Card]:
-    """One-shot: fetch binder → resolve memes → join stats."""
+    """One-shot: fetch binder -> resolve memes -> join stats."""
     cards = fetch_binder(creator)
     resolve_meme_names(cards)
     join_stats(cards)

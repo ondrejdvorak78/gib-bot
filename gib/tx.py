@@ -24,6 +24,8 @@ Account order on the on-chain struct:
     [4] creator            wallet                                     signer+writable
     [5] system_program     11111111111111111111111111111111           readonly
     [6] notification_track PDA(["notification_track", board])         readonly
+
+Fork note (2026-06-15): duplicate-card-slot validation added. See CHANGES.md.
 """
 from __future__ import annotations
 
@@ -55,6 +57,9 @@ def encode_register_to_tournament_data(deck_index: int, cards: Sequence[int]) ->
         deck_index: Which deck slot in the tournament (0-based, unique per caller).
         cards: Binder slot indices for the cards in the deck. Length must match
                the tournament's cardsPerDeck rule (3 for gib.meme mainline).
+               All slots must be distinct (the on-chain program rejects
+               duplicate slots; pre-sim catches it but rejecting here saves the
+               Phantom approval cycle on hand-edited plan.json mistakes).
     """
     if not (0 <= deck_index <= 0xFFFF):
         raise ValueError(f"deck_index {deck_index} out of u16 range")
@@ -65,6 +70,8 @@ def encode_register_to_tournament_data(deck_index: int, cards: Sequence[int]) ->
         raise ValueError(
             f"cards_per_deck mismatch: got {len(cards)}, expected {config.CARDS_PER_DECK}"
         )
+    if len(set(cards)) != len(cards):
+        raise ValueError(f"duplicate card slots in deck: {list(cards)}")
 
     buf = bytearray(config.REGISTER_TO_TOURNAMENT_DISC)
     buf += struct.pack("<H", deck_index)

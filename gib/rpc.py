@@ -2,6 +2,14 @@
 
 All stdlib-only (urllib + json). No httpx/aiohttp required until we need the
 Phantom signing bridge (which is a later module).
+
+Fork note (2026-06-15): see CHANGES.md.
+  - confirm_transaction: tightened to require "confirmed" / "finalized" (was
+    accepting "processed", which silently dropped reorg-impacted txs).
+  - send_transaction: skipPreflight flipped to False so RPC catches expired
+    blockhashes from slow Phantom approvals before they enter the mempool.
+  - simulate_transaction: explicit commitment="confirmed" so the simulation
+    sees state at the same point the submit will hit.
 """
 from __future__ import annotations
 
@@ -60,21 +68,29 @@ def get_account_info(pubkey: str, encoding: str = "base64") -> dict | None:
 
 
 def simulate_transaction(tx_base64: str) -> dict:
+    # Explicit "confirmed" commitment so simulation reads the same state as
+    # the submit will. Without this the default ("finalized" on Helius) shows
+    # stale state for recently-landed-but-not-finalized accounts, which is
+    # exactly the case during a mass-entry cascade pass between sub-batches.
     resp = _post(_HELIUS_RPC, {
         "jsonrpc": "2.0", "id": 1,
         "method": "simulateTransaction",
-        "params": [tx_base64, {"encoding": "base64"}],
+        "params": [tx_base64, {"encoding": "base64", "commitment": "confirmed"}],
     })
     return resp.get("result", {})
 
 
 def send_transaction(tx_base64: str) -> str:
+    # skipPreflight=False so the RPC catches expired blockhashes / closed
+    # tournament windows before the tx hits the mempool. Pre-sim catches the
+    # PROGRAM-logic case; preflight catches the TX-level cases (blockhash
+    # window, account-not-found, signature-not-valid) which pre-sim doesn't.
     resp = _post(_HELIUS_RPC, {
         "jsonrpc": "2.0", "id": 1,
         "method": "sendTransaction",
         "params": [tx_base64, {
             "encoding": "base64",
-            "skipPreflight": True,
+            "skipPreflight": False,
             "preflightCommitment": "confirmed",
         }],
     })
@@ -83,13 +99,15 @@ def send_transaction(tx_base64: str) -> str:
     return resp["result"]
 
 
-def confirm_transaction(signature: str, timeout: int = 12) -> bool:
+def confirm_transaction(signature: str, timeout: int = 30) -> bool:
     """Poll until a transaction is confirmed-and-successful, reverted, or timeout.
 
-    Returns True only if landed AND program returned no error.
-    Accepts "processed" as confirmation since pre-sim guarantees the tx will succeed.
+    Returns True only if landed AND program returned no error at "confirmed"
+    or "finalized" commitment. Earlier versions of this module accepted
+    "processed" status as success; reorg-impacted txs that show "processed"
+    can be dropped without finalizing, which leaves the bot's submitted.json
+    falsely claiming success while the on-chain registry has no entry.
     """
-    import time
     deadline = time.time() + timeout
     while time.time() < deadline:
         resp = _post(_HELIUS_RPC, {
@@ -102,7 +120,7 @@ def confirm_transaction(signature: str, timeout: int = 12) -> bool:
             status = statuses[0]
             if status.get("err"):
                 raise RuntimeError(f"tx reverted on-chain: {status['err']}")
-            if status.get("confirmationStatus") in ("processed", "confirmed", "finalized"):
+            if status.get("confirmationStatus") in ("confirmed", "finalized"):
                 return True
         time.sleep(0.5)
     return False
