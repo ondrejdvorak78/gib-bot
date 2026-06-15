@@ -3,11 +3,18 @@
 
 Usage:
     python cli.py inventory              # show your cards + lock status + power
-    python cli.py plan [--champs N]      # score cards and build decks → plan.json
+    python cli.py plan [--champs N]      # score cards and build decks -> plan.json
     python cli.py simulate               # dry-run txs against mainnet (no signing)
     python cli.py submit                 # open Phantom bridge and submit for real
 
 Set HELIUS_API_KEY and WALLET in .env or as env vars.
+
+Fork note (2026-06-15): see CHANGES.md.
+  - submit: tournament index is re-resolved at the top of every cascade pass
+    so a tournament-window transition mid-batch does NOT silently land tail
+    txs on the wrong (now-closed) tournament.
+  - simulate / submit / deposit: txbuilder.fetch_lookup_tables() returns both
+    primary + fallback ALTs; the v0 message references both concurrently.
 """
 from __future__ import annotations
 
@@ -67,7 +74,6 @@ def cmd_inventory(args: argparse.Namespace) -> None:
         if len(with_stats) > 40:
             print(f"  ... and {len(with_stats) - 40} more")
 
-    # Save full inventory to state
     STATE_DIR.mkdir(exist_ok=True)
     inv = []
     for c in cards:
@@ -109,19 +115,16 @@ def cmd_plan(args: argparse.Namespace) -> None:
     skipped = len(scored) - len(positive)
     print(f"scored cards: {len(scored)} ({len(positive)} with power, {skipped} zero)")
 
-    # Auto-detect tournament and exclude cards already registered on-chain
     tournament_index = _resolve_tournament(args.tournament)
     registered = binder.get_registered_slots(cards, tournament_index)
     exclude_slots: set[int] = set(registered)
     if registered:
         print(f"{len(registered)} cards already registered in tournament {tournament_index}, excluding")
 
-    # Determine start_index from on-chain registered deck count
     start_index = len(registered) // config.CARDS_PER_DECK
     if registered:
         print(f"starting deck index at {start_index}")
 
-    # Handle --exclude: also skip cards from a prior plan file
     if args.exclude:
         exclude_path = Path(args.exclude)
         if not exclude_path.exists():
@@ -131,7 +134,6 @@ def cmd_plan(args: argparse.Namespace) -> None:
         for d in prior:
             for slot in d["cards"]:
                 exclude_slots.add(slot)
-        # Use max index from prior plan if higher
         prior_max = max(d["index"] for d in prior) + 1
         start_index = max(start_index, prior_max)
         print(f"also excluding {len(set(s for d in prior for s in d['cards']))} slots from prior plan")
@@ -157,7 +159,6 @@ def cmd_plan(args: argparse.Namespace) -> None:
         print(f"  strongest: {totals[-1]:.1f}  weakest: {totals[0]:.1f}")
         print(f"  median:    {median:.1f}  spread: {spread:.0f}%")
 
-    # Save plan
     STATE_DIR.mkdir(exist_ok=True)
     plan = []
     for d in built:
@@ -216,14 +217,14 @@ def cmd_simulate(args: argparse.Namespace) -> None:
     instructions = _build_all_instructions(plan, wallet, tournament_index)
     print(f"all {len(instructions)} instructions built.")
 
-    # Try full tx building with solders if available
     try:
         from gib import txbuilder
         from solders.pubkey import Pubkey
 
-        print("fetching lookup table...")
-        lut = txbuilder.fetch_lookup_table()
-        print(f"LUT loaded: {len(lut.addresses)} addresses")
+        print("fetching lookup tables (primary + fallback)...")
+        luts = txbuilder.fetch_lookup_tables()
+        for l in luts:
+            print(f"  LUT {str(l.key)[:8]}...: {len(l.addresses)} addresses")
 
         print("fetching recent blockhash...")
         blockhash = txbuilder.get_recent_blockhash()
@@ -234,14 +235,13 @@ def cmd_simulate(args: argparse.Namespace) -> None:
 
         for i, batch in enumerate(batches):
             vtx = txbuilder.build_versioned_transaction(
-                batch, payer, blockhash, lut,
+                batch, payer, blockhash, luts,
                 compute_units=1_400_000,
             )
             tx_b64 = txbuilder.serialize_for_phantom(vtx)
-            size = len(tx_b64) * 3 // 4  # approximate decoded size
+            size = len(tx_b64) * 3 // 4
             print(f"  tx {i}: {len(batch)} decks, ~{size} bytes serialized")
 
-            # Simulate the first tx to verify it works
             if i == 0:
                 print(f"\nsimulating tx 0 against mainnet...")
                 result = rpc.simulate_transaction(tx_b64)
@@ -302,12 +302,13 @@ def cmd_deposit(args: argparse.Namespace) -> None:
         sys.exit(1)
     print(f"  using hgtiju_pda = {hgtiju_pda}")
 
-    # Fetch current binder live_spaces — first deposit goes into slot `live_spaces`,
-    # next into live_spaces+1, etc.
     import struct, base64
     from gib.pdas import binder_pda
     binder_addr, _ = binder_pda(wallet)
     binder_info = rpc.get_account_info(binder_addr)
+    if not binder_info:
+        print(f"error: binder account {binder_addr} not found — deposit one card via the gib.meme UI first", file=sys.stderr)
+        sys.exit(1)
     binder_raw = base64.b64decode(binder_info["data"][0])
     starting_slot = struct.unpack_from("<H", binder_raw, 59)[0]
     print(f"  binder live_spaces = {starting_slot}  (deposits will fill slots {starting_slot}..{starting_slot + len(plans) - 1})")
@@ -323,11 +324,10 @@ def cmd_deposit(args: argparse.Namespace) -> None:
     from solders.pubkey import Pubkey
     from concurrent.futures import ThreadPoolExecutor
 
-    print("\nfetching lookup table + blockhash...")
-    lut = txbuilder.fetch_lookup_table()
+    print("\nfetching lookup tables (primary + fallback) + blockhash...")
+    luts = txbuilder.fetch_lookup_tables()
     payer = Pubkey.from_string(wallet)
 
-    # Build one tx per deposit. Use 400_000 CU (transfer ~80k + register_card ~45k + headroom).
     def build_chunk(start: int, count: int) -> dict:
         end = min(start + count, len(plans))
         blockhash = txbuilder.get_recent_blockhash()
@@ -338,7 +338,7 @@ def cmd_deposit(args: argparse.Namespace) -> None:
                 wallet, plan, hgtiju_pda, new_slot_index=starting_slot + i,
             )
             vtx = txbuilder.build_versioned_transaction(
-                ixs, payer, blockhash, lut, compute_units=400_000,
+                ixs, payer, blockhash, luts, compute_units=400_000,
             )
             tx_b64 = txbuilder.serialize_for_phantom(vtx)
             label = f"deposit {plan.meme} {plan.asset_id[:8]}"
@@ -358,7 +358,6 @@ def cmd_deposit(args: argparse.Namespace) -> None:
         return {"txs": txs, "skipped": skipped}
 
     if args.simulate_only:
-        # Just build chunk 0 and exit — no Phantom.
         print("\nSIMULATE ONLY — building first tx and running simulateTransaction...")
         chunk = build_chunk(0, 1)
         if chunk["skipped"]:
@@ -371,7 +370,7 @@ def cmd_deposit(args: argparse.Namespace) -> None:
         return
 
     chunk_size = args.chunk_size
-    print(f"\n{len(plans)} deposits in chunks of {chunk_size} → ~{(len(plans)+chunk_size-1)//chunk_size} popup(s)")
+    print(f"\n{len(plans)} deposits in chunks of {chunk_size} -> ~{(len(plans)+chunk_size-1)//chunk_size} popup(s)")
     results = sign_server.run_bridge(
         port=args.port, total=len(plans),
         chunk_size=chunk_size, build_chunk=build_chunk,
@@ -400,7 +399,7 @@ def _run_submit_pass(
     from solders.pubkey import Pubkey
 
     instructions = _build_all_instructions(plan_decks, wallet, tournament_index)
-    lut = txbuilder.fetch_lookup_table()
+    luts = txbuilder.fetch_lookup_tables()
     payer = Pubkey.from_string(wallet)
 
     def build_chunk(start: int, count: int) -> dict:
@@ -409,7 +408,7 @@ def _run_submit_pass(
 
         def build_one(i: int) -> dict:
             vtx = txbuilder.build_versioned_transaction(
-                [instructions[i]], payer, blockhash, lut, compute_units=1_400_000,
+                [instructions[i]], payer, blockhash, luts, compute_units=1_400_000,
             )
             tx_b64 = txbuilder.serialize_for_phantom(vtx)
             label = f"deck {plan_decks[i]['index']}: {plan_decks[i]['label']}"
@@ -440,11 +439,9 @@ def cmd_submit(args: argparse.Namespace) -> None:
         sys.exit(1)
 
     full_plan = json.loads(plan_file.read_text())
-    tournament_index = _resolve_tournament(args.tournament)
+    # Initial tournament resolution; we re-check at every cascade pass.
+    initial_tournament_index = _resolve_tournament(args.tournament)
 
-    # Cascade chunk sizes — each successive pass tightens batching to dodge
-    # 429s that killed the larger ones. Stops once nothing's left or a pass
-    # makes zero progress.
     if args.no_retry:
         cascade = [args.chunk_size]
     else:
@@ -455,13 +452,27 @@ def cmd_submit(args: argparse.Namespace) -> None:
 
     total_landed = 0
     total_pass = 0
-    # Slots locked by signatures we just landed in earlier passes. Helius DAS
-    # lags on-chain state by 10–30s, so without this we'd re-submit decks the
-    # bot just registered. Keyed by binder slot index.
     session_locked: set[int] = set()
     for chunk_size in cascade:
-        # Re-fetch on-chain state to skip decks whose cards just landed.
         print(f"\n=== pass {total_pass + 1}/{len(cascade)} (chunk-size {chunk_size}) ===")
+
+        # Re-resolve tournament if not user-pinned. If the active tournament
+        # changed since the prior pass, abort — the new tail won't make it
+        # into the previous tournament's bracket and shouldn't silently land
+        # in a different one.
+        if args.tournament is None:
+            current = rpc.find_open_tournament()
+            if current is None:
+                print("no tournament currently open for registration — stopping cascade.")
+                break
+            if current != initial_tournament_index:
+                print(f"tournament window changed mid-cascade: was {initial_tournament_index}, "
+                      f"now {current}. Stopping. Re-run with --tournament {current} to retarget.")
+                break
+            tournament_index = current
+        else:
+            tournament_index = initial_tournament_index
+
         print("checking on-chain state for already-registered cards...")
         all_cards = binder.fetch_binder(wallet)
         registered = binder.get_registered_slots(all_cards, tournament_index) | session_locked
@@ -481,8 +492,6 @@ def cmd_submit(args: argparse.Namespace) -> None:
         total_pass += 1
         print(f"pass {total_pass} result: {sent} landed, {len(results) - sent} failed/skipped")
 
-        # Lock the slots from decks that just landed so the next pass doesn't
-        # re-submit them while waiting for DAS to catch up.
         landed_labels = {r["label"] for r in results if "signature" in r}
         for d in pending:
             label = f"deck {d['index']}: {d['label']}"
@@ -490,7 +499,6 @@ def cmd_submit(args: argparse.Namespace) -> None:
                 for s in d["cards"]:
                     session_locked.add(s)
 
-        # Persist per-pass results
         history = json.loads(history_file.read_text()) if history_file.exists() else []
         timestamp = datetime.now(timezone.utc).isoformat()
         by_label = {r.get("label"): r for r in results}
@@ -539,8 +547,8 @@ def main() -> None:
     sub_p = sub.add_parser("submit", help="Open Phantom bridge and submit decks")
     sub_p.add_argument("--tournament", type=int, default=None, help="Override tournament index (auto-detected if omitted)")
     sub_p.add_argument("--port", type=int, default=8787, help="Localhost port for Phantom bridge")
-    sub_p.add_argument("--chunk-size", type=int, default=25, help="First-pass tx-per-popup count (default 25). Cascade then drops to 10→5→3→1 unless --no-retry is set.")
-    sub_p.add_argument("--no-retry", action="store_true", help="Disable the 25→10→5→3→1 auto-retry cascade; only run the initial chunk-size pass.")
+    sub_p.add_argument("--chunk-size", type=int, default=25, help="First-pass tx-per-popup count (default 25). Cascade then drops to 10->5->3->1 unless --no-retry is set.")
+    sub_p.add_argument("--no-retry", action="store_true", help="Disable the 25->10->5->3->1 auto-retry cascade; only run the initial chunk-size pass.")
 
     args = parser.parse_args()
     if not args.command:

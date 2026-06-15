@@ -1,9 +1,25 @@
-# gib-bot
+# gib-bot (fork)
 
 A local tool for [gib.meme](https://gib.meme) players that automates the
 tedious part of tournament prep: building decks from your binder and
 submitting them all in one Phantom approval flow instead of clicking through
 one popup per deck.
+
+This is a fork of [ForWakanda/gib-bot](https://github.com/ForWakanda/gib-bot).
+See [CHANGES.md](CHANGES.md) for the diff. The upstream's behavior, CLI,
+and design are preserved; this fork tightens correctness + robustness +
+local-network security. Adopt if any of these matter to you:
+
+- **Lookup-table compatibility** as gib.meme rotates its client (the
+  upstream pin is one ALT version behind).
+- **State-claim discipline** — under reorg or expired-blockhash conditions
+  the upstream silently believed it had landed transactions that never did.
+- **LAN security** — upstream bound the Phantom-signing bridge to
+  `0.0.0.0`; this fork binds `127.0.0.1` by default.
+- **Tournament-window race** — the upstream's submit cascade did not
+  re-check the active tournament between retry passes.
+
+If you depend on the upstream behavior exactly, do not adopt this fork.
 
 The bot does **not** try to be smart about deck construction. It uses a
 power-descending strategy: sorts your available cards by raw power (the
@@ -28,7 +44,7 @@ between `plan` and `submit`, or fork this and write your own scorer.
   would revert get skipped automatically.
 - Batches signing through Phantom's `signAllTransactions` so you confirm
   20-25 decks per popup instead of one at a time.
-- Auto-retries failures at smaller batch sizes (25 → 10 → 5 → 3 → 1).
+- Auto-retries failures at smaller batch sizes (25 -> 10 -> 5 -> 3 -> 1).
 - Re-checks on-chain state between retries so it never re-submits a deck
   that just landed.
 
@@ -69,7 +85,7 @@ once (skip if you already have them):
 Then open **Git Bash** (search "Git Bash" in the Start menu) and run:
 
 ```bash
-git clone https://github.com/ForWakanda/gib-bot.git
+git clone https://github.com/<your-username>/gib-bot.git
 cd gib-bot
 ./setup.bat
 ```
@@ -91,7 +107,7 @@ Your prompt will start with `(.venv)`. Then run any command from the
 ## macOS / Linux quickstart
 
 ```bash
-git clone https://github.com/ForWakanda/gib-bot.git
+git clone https://github.com/<your-username>/gib-bot.git
 cd gib-bot
 ./setup.sh
 ```
@@ -164,6 +180,13 @@ python cli.py submit --tournament 84
   on the `WALLET=` line, no quotes, no spaces, no trailing characters.
 - **Port 8787 already in use**: another program is using it. Either close
   that program, or pass `--port 8788` to `submit` / `deposit`.
+- **`blockhash not found` at submit (NEW in this fork)**: you clicked the
+  Phantom approval more than ~60-90 seconds after the chunk was built. The
+  blockhash window expired. Re-run `submit`; the bot builds a fresh
+  blockhash for each cascade pass.
+- **`tournament window changed mid-cascade` (NEW in this fork)**: gib.meme
+  transitioned to a new tournament while the bot was mid-submit. Re-run
+  with the printed `--tournament <N>` hint to retarget.
 
 ## How submission works
 
@@ -174,7 +197,7 @@ python cli.py submit --tournament 84
 3. The page connects to Phantom, fetches transactions from the bridge in
    chunks of 25, asks Phantom to sign them all at once (one popup per chunk),
    sends them in parallel, and reports per-tx success or error.
-4. If anything failed, it retries at smaller chunk sizes (10 → 5 → 3 → 1)
+4. If anything failed, it retries at smaller chunk sizes (10 -> 5 -> 3 -> 1)
    re-reading on-chain state between passes so already-landed decks are
    skipped.
 
@@ -201,6 +224,6 @@ MIT. See [LICENSE](LICENSE).
 
 ## Contributing
 
-PRs welcome for bug fixes and quality-of-life improvements. The maintainer
-is not actively building a mobile / hosted version of this — if you want one,
-fork it and ship it.
+PRs welcome for bug fixes and quality-of-life improvements. Upstream is
+[ForWakanda/gib-bot](https://github.com/ForWakanda/gib-bot); consider
+opening upstream PRs there too where the fix is broadly applicable.

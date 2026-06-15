@@ -1,14 +1,16 @@
 [project]
 name = "gib-bot"
-version = "0.1.0"
-description = "Local tool for auto-submitting gib.meme tournament decks."
+version = "0.2.0"
+description = "Local tool for auto-submitting gib.meme tournament decks. Fork — see CHANGES.md."
 requires-python = ">=3.10"
 
 dependencies = [
     "solders>=0.21",   # Solana primitives (v0 tx, pubkey, keypair serialization)
-    "httpx>=0.27",     # HTTP client for RPC + gib.meme APIs
-    "aiohttp>=3.9",    # Tiny localhost server for the Phantom signing bridge
 ]
+
+# httpx and aiohttp were declared in the upstream pyproject but never imported
+# anywhere in the codebase (rpc.py + sign_server.py use stdlib urllib +
+# http.server). Removed in this fork to shrink the install footprint.
 
 [project.optional-dependencies]
 dev = []
